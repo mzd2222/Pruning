@@ -131,7 +131,7 @@ class vgg(nn.Module):
 def compute_L2_activation(activations, CT=None):
     L2_activations = []
     for activation in activations:
-        activation = nn.LeakyReLU()(activation)
+        # activation = nn.LeakyReLU()(activation)
         L2_activations.append(activation.cpu().norm(dim=(1, 2), p=2).cuda())
     if CT is not None:
         temp = np.array(L2_activations)
@@ -141,13 +141,14 @@ def compute_L2_activation(activations, CT=None):
 
 
 # 计算每层输出CRV的阈值 每层一个阈值 维度为[n]
-def sort_L2_activations(L2_activations, percent, thresholds):
+def sort_L2_activations(L2_activations, percent):
+    thresholds = []
     for tensor in L2_activations:
         y, i = torch.sort(tensor)
         total = len(y)
         thre_index = int(total * percent)
-        thre = y[thre_index]  # 求阈值
-        # thre = y.mean()       # 两种办法
+        # thre = y[thre_index]  # 求阈值
+        thre = y.mean()       # 两种办法
         thresholds.append(thre)
     return thresholds
 
@@ -178,12 +179,11 @@ def get_mask(model, imgs, pruned_percent):
     with torch.no_grad():
         # pruned_percent 剪枝率
         imgs_masks = []
-        thresholds = []
         one_img_masks = []
         CT = 0
         for img in tqdm.tqdm(imgs, desc="calculate masks:"):
 
-            thresholds.clear()
+
             activations.clear()
             one_img_masks.clear()
 
@@ -195,7 +195,7 @@ def get_mask(model, imgs, pruned_percent):
             # 输出维度为[n, c] n为卷积输出个数
             L2_activations = compute_L2_activation(activations)
             # 输出阈值队列 长度为 n
-            thresholds = sort_L2_activations(L2_activations, percent=pruned_percent, thresholds=thresholds)
+            thresholds = sort_L2_activations(L2_activations, percent=pruned_percent)
             CT += 1
 
             # 计算每一层的mask掩码
@@ -213,12 +213,15 @@ def get_mask(model, imgs, pruned_percent):
         # for i in imgs_masks:
         #     for j in i:
         # print(j.shape)
+        # for i in imgs_masks:
+        #     print(sum(i))
         mask = imgs_masks[0]
+
         for idx1 in range(layer_num):
             for idx2 in range(img_num):
                 mask[idx1] |= imgs_masks[idx2][idx1]
         # print("````````````````````````````")
-
+        # print(sum(mask))
         # for k in mask:
         #     print(k.shape)
 
@@ -239,12 +242,12 @@ def read_Img2(dataSet_path, batchSize, target_class, pics_num):
     ])
 
     if dataSet == 'CIFAR100':
-        data_set = datasets.CIFAR100(dataSet_path, transform=transform, download=False)
+        data_set = datasets.CIFAR100(dataSet_path, transform=transform, download=False, train=True)
 
     elif dataSet == 'CIFAR10':
-        data_set = datasets.CIFAR10(dataSet_path, transform=transform, download=False)
+        data_set = datasets.CIFAR10(dataSet_path, transform=transform, download=False, train=True)
 
-    data_loder = dataloader.DataLoader(data_set, batch_size=batchSize, shuffle=True, num_workers=1, drop_last=True)
+    data_loder = dataloader.DataLoader(data_set, batch_size=batchSize, shuffle=True, num_workers=1, drop_last=False)
 
     counts = []
     inputs = []
@@ -423,7 +426,7 @@ def train_model_all(model, trainSet_path, epoches, batchSize, model_save_path):
     for epoch in range(epoches):
         epoch_loss = 0
         idx = 0
-        for data, label in tqdm.tqdm(data_loder, desc="training:", leave=True, ):
+        for data, label in tqdm.tqdm(data_loder, desc="training:"):
             data = data.cuda()
             label = label.cuda()
 
@@ -563,12 +566,14 @@ def train_model(model, trainSet_path, epoches, batchSize, model_save_path, forze
 
 # 重写微调训练
 def fine_tuning(model, data_list, lable_list, EPOCH, model_save_path, forzen=True):
-    model.train()
-    model.cuda()
+
 
     for idx, lables in enumerate(lable_list):
         lables = torch.tensor([idx for _ in range(len(data_list[idx]))])
         lable_list[idx] = lables
+
+    model.train()
+    model.cuda()
 
     # forzen表示是否冻结卷积层
     if forzen:
@@ -612,7 +617,7 @@ def fine_tuning(model, data_list, lable_list, EPOCH, model_save_path, forzen=Tru
             optimizer.step()
 
         scheduler.step()
-        print(total_loss/item_num)
+        # print(total_loss/item_num)
 
 
 def test(model, dataSet_path, batchSize, class_num):
@@ -693,6 +698,65 @@ def get_img_socre(imgs, sampling=1000):
         score += KL_div
     return score / img_num
 
+# 重写测试·
+def test_reserved_classes(model, reserved_classes, data_path, num_imgs):
+    model.cuda()
+    model.eval()
+    # if not isinstance(model, torch.nn.DataParallel):
+    #     model = nn.DataParallel(model)
+
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std)
+    ])
+
+    if dataSet == 'CIFAR100':
+        data_set = datasets.CIFAR100(data_path, transform=transform, download=False, train=False)
+        num_classes = 100
+
+    elif dataSet == 'CIFAR10':
+        data_set = datasets.CIFAR10(data_path, transform=transform, download=False, train=False)
+        num_classes = 10
+
+    data_loder = dataloader.DataLoader(data_set, batch_size=1024, shuffle=True)
+
+    test_images_data = []
+    test_images_lable = []
+    classes_counts = []
+    for i in range(num_classes):
+        classes_counts.append(0)
+        test_images_lable.append([])
+        test_images_data.append([])
+
+
+    for x, lable in data_loder:
+
+        for idx_ in range(len(x)):
+
+            class_idx = lable[idx_]
+
+            if class_idx in reserved_classes and classes_counts[class_idx] < num_imgs:
+                test_images_data[class_idx].append(x[idx_])
+                test_images_lable[class_idx].append(lable[idx_])
+                class_idx[class_idx] += 1
+
+    images_data = torch.empty([num_imgs, 3, 32, 32])
+    images_lable = torch.empty([num_imgs], dtype=torch.long)
+
+    for idx, (x, y) in enumerate(zip(test_images_data, test_images_lable)):
+        images_data[idx] = x
+        images_lable[idx] = y
+
+
+
+
+
+
+
+
+
+
+
 
 if __name__ == '__main__':
 
@@ -704,7 +768,7 @@ if __name__ == '__main__':
                         help='input batch size for testing (default: 256)')
     parser.add_argument('--no-cuda', action='store_true', default=False,
                         help='disables CUDA training')
-    parser.add_argument('--depth', type=int, default=16,
+    parser.add_argument('--depth', type=int, default=11,
                         help='depth of the vgg')
     parser.add_argument('--percent', type=float, default=0.5,
                         help='scale sparse rate (default: 0.5)')
@@ -719,6 +783,10 @@ if __name__ == '__main__':
         os.makedirs(args.save)
 
     # model = vgg(dataset=args.dataset, depth=args.depth)
+    # train_model_all(model=model, epoches=50, batchSize=1024,
+    #                model_save_path='./models/VGG16_cifar10_Transfer_5.pkl',
+    #                trainSet_path=data_path)
+
 
     model = torch.load('./models/VGG16_cifar10_Transfer_5.pkl').cuda()
     # print(model)
@@ -739,15 +807,13 @@ if __name__ == '__main__':
     #     print(y.size(), lables[ii].size())
     #     print(torch.eq(y, lables[ii]).sum().item() / lables[ii].size(0))
 
-    # train_model_all(model=model, epoches=50, batchSize=1024,
-    #                model_save_path='./models/VGG16_cifar10_Transfer_5.pkl',
-    #                trainSet_path=data_path)
+
 
     # model = torch.load('./original_models/VGG16_cifar10.pkl').cuda()
     # test(model, data_path, batchSize=1024, class_num=10)
     # exit(0)
     image_num = 500  # 每个类保留图片数量
-    class_num = 3  # 随机保留类数量
+    class_num = 5  # 随机保留类数量
     classes = []
 
     for _ in range(0):
@@ -759,7 +825,7 @@ if __name__ == '__main__':
         cc.sort()
         classes.append(cc)
 
-    for reserved_classes in [[0,1,2]]:
+    for reserved_classes in [[0, 1, 2]]:
         #
         #        res = './result9/VGG16_' + str(class_num) + 'C_AutoP.pdf'
         #
@@ -778,28 +844,30 @@ if __name__ == '__main__':
         class_num = len(reserved_classes)
         # 读取剪枝用到的数据
         print(reserved_classes)
-        # fine_tuning_data, fine_tuning_lable = choose_best_data(model=model, dataSet_path="./data",
-        #                                 reserved_classes=reserved_classes, num_images=image_num,
-        #                                 correct_rate=0.8, is_train=True, use_KL=True, divide_radio=4)
-        #
-        #
-        # # 测试数据准确性
-        # for ii in range(class_num):
-        #     out = model(fine_tuning_data[ii])
-        #
-        #     y = torch.argmax(out, dim=1)
-        #
-        #     print(y.size(), fine_tuning_lable[ii].size())
-        #     print(torch.eq(y, fine_tuning_lable[ii]).sum().item() / fine_tuning_lable[ii].size(0))
 
-        imgs = read_Img2(data_path, batchSize=512, target_class=reserved_classes, pics_num=4-00)
+        imgs_, imgs_lable = choose_best_data(model=model, dataSet_path="./data",
+                                        reserved_classes=reserved_classes, num_images=100,
+                                        correct_rate=0.8, is_train=True, use_KL=True, divide_radio=4)
+        # 测试数据准确性
+        for ii in range(class_num):
+            out = model(imgs_[ii])
+
+            y = torch.argmax(out, dim=1)
+
+            print(y.size(), imgs_lable[ii].size())
+            print(torch.eq(y, imgs_lable[ii]).sum().item() / imgs_lable[ii].size(0))
+
+        imgs = torch.cat(imgs_, dim=0)
+
+        # imgs = read_Img2(data_path, batchSize=512, target_class=reserved_classes, pics_num=200)
         # 剪枝率
         img_score = 1.23 * float(get_img_socre(imgs, sampling=class_num * 10))
         pruned_percent = func(class_num / 10) + img_score
         print('pruning rate is', pruned_percent)
         #
         # imgs = read_Img('./mix/', transformer=transform)
-        model.train()
+
+        model.eval()
         masks = get_mask(model, imgs, pruned_percent)
 
         model = torch.load('./models/VGG16_cifar10_Transfer_5.pkl').cuda()
@@ -932,21 +1000,33 @@ if __name__ == '__main__':
                 else:
                     m1.weight.data = m0.weight.data.clone()[out_mask, :, :, :]
 
+            #全连接
+            elif isinstance(m0, nn.Linear):
 
-            # 全连接
-            # elif isinstance(m0, nn.Linear):
-            #     idx0 = np.squeeze(np.argwhere(np.asarray(start_mask.cpu().numpy())))
-            #     if idx0.size == 1:
-            #         idx0 = np.resize(idx0, (1,))
-            #     m1.weight.data = m0.weight.data[:, idx0.tolist()].clone()
-            #     m1.bias.data = m0.bias.data.clone()
+                m1.weight.data = m0.weight.data.clone()[:, cfg_mask[-1]]
+
+                linear_mask = torch.empty([10], dtype=torch.bool)
+                for idx_ in range(10):
+                    if idx_ in reserved_classes:
+                        linear_mask[idx_] = True
+                    else:
+                        linear_mask[idx_] = False
+
+                m1.weight.data = m1.weight.data.clone()[linear_mask, :]
+                m1.bias.data = m0.bias.data.clone()[linear_mask]
+
+                # print(m1.weight.data.size())
+                # print(m1.bias.data.size())
+
 
         # newmodel.classifier = nn.Linear(in_features=cfg[-1], out_features=class_num)
-        classifier = nn.Linear(in_features=cfg[-1], out_features=class_num)
+        # classifier = nn.Linear(in_features=cfg[-1], out_features=class_num)
         # idx0 = np.arange(0, class_num)
+        # print(classifier.weight.data.size())
+        # print(classifier.bias.data.size())
         # classifier.weight.data = newmodel.classifier.weight.data[idx0, :].clone()
         # classifier.bias.data = newmodel.classifier.bias.data[idx0].clone()
-        newmodel.classifier = classifier
+        # newmodel.classifier = classifier
         # print(newmodel)
         #
         #        torch.save(newmodel, './new_models/vgg16_CIFAR10_pruned'+str(class_num)+'C.pkl')
@@ -972,7 +1052,7 @@ if __name__ == '__main__':
 
         newmodel.train()
         fine_tuning(model=newmodel, data_list=fine_tuning_data,
-                    lable_list=fine_tuning_lable, EPOCH=100, model_save_path='', forzen=True)
+                    lable_list=fine_tuning_lable, EPOCH=200, model_save_path='', forzen=True)
 
         newmodel.eval()
 
@@ -980,16 +1060,18 @@ if __name__ == '__main__':
 
     reserved_classes = [0, 1, 2]
     model = torch.load("models/VGG16_cifar10_Transfer_5.pkl")
-    newmodel = torch.load("models/VGG16_CIFAR10_NewModel.pkl")
+    # newmodel = torch.load("models/VGG16_CIFAR10_NewModel.pkl")
     model.eval()
     newmodel.eval()
     fine_tuning_test_data, fine_tuning_test_lable = choose_best_data(model=model, dataSet_path="./data",
                                                                      reserved_classes=reserved_classes, num_images=200,
                                                                      correct_rate=0.0, is_train=False, use_KL=False,
-                                                                     divide_radio=4)
+                                                                     divide_radio=1)
+
+
     #测试数据准确性
     for ii in range(class_num):
-        out = model(fine_tuning_test_data[ii])
+        out = newmodel(fine_tuning_test_data[ii])
 
         y = torch.argmax(out, dim=1)
 
@@ -997,7 +1079,7 @@ if __name__ == '__main__':
         print(torch.eq(y, fine_tuning_test_lable[ii]).sum().item() / fine_tuning_test_lable[ii].size(0))
 
     for ii in range(class_num):
-        out = newmodel(fine_tuning_test_data[ii])
+        out = model(fine_tuning_test_data[ii])
 
         y = torch.argmax(out, dim=1)
 
