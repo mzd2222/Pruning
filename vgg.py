@@ -19,9 +19,13 @@ import torch.autograd.function
 from math import sin, cos
 import torchvision
 from torch.utils import data as Data
+from visdom import Visdom
 
 torch.set_printoptions(sci_mode=False)
 torch.manual_seed(1)
+
+# vis = Visdom()
+# vis.line([0], [0], win="train_acc", env="main", opts=dict(title='train acc'))
 
 
 def func(x):
@@ -151,8 +155,8 @@ def sort_L2_activations(L2_activations, percent):
         y, i = torch.sort(tensor)
         total = len(y)
         thre_index = int(total * percent)
-        # thre = y[thre_index]  # 求阈值
-        thre = y.mean()  # 两种办法
+        thre = y[thre_index]  # 求阈值
+        # thre = y.mean()  # 两种办法
         thresholds.append(thre)
     return thresholds
 
@@ -264,8 +268,12 @@ def read_Img2(dataSet_path, batchSize, target_class, pics_num):
     #     target_class.append(idx)
 
     # image_num表示微调时选区的图片数量
-    for data, label in tqdm.tqdm(data_loder, desc="loading_imgs: "):
-        for idx in range(len(label)):
+    for data, label in data_loder:
+
+        if sum(counts) == len(target_class) * pics_num:
+            break
+
+        for idx in tqdm.tqdm(range(len(label)), desc="loading_imgs: "):
             if label[idx] in target_class and counts[label[idx]] < pics_num:
                 inputs.append(data[idx].cuda())
                 counts[label[idx]] += 1
@@ -587,12 +595,15 @@ def fine_tuning(model, data_list, lable_list, EPOCH, model_save_path, forzen=Tru
                 module.bias.requires_grad = True
 
     loss_func = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(params=model.parameters(), lr=0.03)
+    optimizer = optim.SGD(params=model.parameters(), lr=0.01)
     # scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCH)
     # scheduler = optim.lr_scheduler.StepLR(optimizer, )
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=100)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=100)
 
     optimizer.zero_grad()
+
+    acc_list = []
+    images_data, images_lable = None, None
 
     for epoch in tqdm.tqdm(range(EPOCH), desc="trainning:"):
 
@@ -623,8 +634,22 @@ def fine_tuning(model, data_list, lable_list, EPOCH, model_save_path, forzen=Tru
         # print(total_loss/item_num)
 
         model.eval()
-        # test_reserved_classes(model, reserved_classes=reserved_classes, data_path='./data', num_imgs=100)
+        images_data, images_lable, acc = test_reserved_classes(model,
+                                                               reserved_classes=reserved_classes,
+                                                               data_path='./data', num_imgs=100,
+                                                               images_data=images_data,
+                                                               images_lable=images_lable,
+                                                               is_print=False)
+        # vis.line([acc], [epoch], win='train_acc', update='append')
+        acc_list.append(acc)
         model.train()
+
+    savepath = "./none/acc.txt"
+    with open(savepath, "a") as fp:
+        for acc in acc_list:
+            fp.write(str(acc) + " ")
+        fp.write("\n")
+
 
 def test(model, dataSet_path, batchSize, class_num):
     model.cuda()
@@ -705,62 +730,70 @@ def get_img_socre(imgs, sampling=1000):
     return score / img_num
 
 
-# 重写测试·
-def test_reserved_classes(model, reserved_classes, data_path, num_imgs):
+# 重写测试
+def test_reserved_classes(model, reserved_classes, data_path, num_imgs,
+                          images_data=None, images_lable=None, is_print=True):
     model.cuda()
     model.eval()
     # if not isinstance(model, torch.nn.DataParallel):
     #     model = nn.DataParallel(model)
 
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean, std)
-    ])
-
     if dataSet == 'CIFAR100':
-        data_set = datasets.CIFAR100(data_path, transform=transform, download=False, train=False)
         num_classes = 100
-
     elif dataSet == 'CIFAR10':
-        data_set = datasets.CIFAR10(data_path, transform=transform, download=False, train=False)
         num_classes = 10
 
-    data_loder = dataloader.DataLoader(data_set, batch_size=1024, shuffle=True)
+    if images_data is None or images_lable is None:
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std)
+        ])
 
-    test_images_data = []
-    test_images_lable = []
-    classes_counts = []
+        if dataSet == 'CIFAR100':
+            data_set = datasets.CIFAR100(data_path, transform=transform, download=False, train=False)
+
+        elif dataSet == 'CIFAR10':
+            data_set = datasets.CIFAR10(data_path, transform=transform, download=False, train=False)
+
+        data_loder = dataloader.DataLoader(data_set, batch_size=1024, shuffle=True)
+
+        test_images_data = []
+        test_images_lable = []
+        classes_counts = []
+        for _ in range(num_classes):
+            classes_counts.append(0)
+            test_images_lable.append([])
+            test_images_data.append([])
+
+        for x, lable in data_loder:
+
+            for idx_ in range(len(x)):
+
+                class_idx = lable[idx_]
+
+                if class_idx in reserved_classes and classes_counts[class_idx] < num_imgs:
+                    test_images_data[class_idx].append(x[idx_])
+                    test_images_lable[class_idx].append(lable[idx_])
+                    classes_counts[class_idx] += 1
+
+        images_data = torch.empty([num_imgs * len(reserved_classes), 3, 32, 32])
+        images_lable = torch.empty([num_imgs * len(reserved_classes)], dtype=torch.long)
+
+        idx = 0
+        for class_x, class_y in zip(test_images_data, test_images_lable):
+            for x, y in zip(class_x, class_y):
+                images_data[idx] = x
+                images_lable[idx] = y
+                idx += 1
+
+        images_data, images_lable = images_data.cuda(), images_lable.cuda()
+
     correct_list = []
     accuracy_list = []
-    for i in range(num_classes):
-        classes_counts.append(0)
-        test_images_lable.append([])
-        test_images_data.append([])
+
+    for _ in range(num_classes):
         correct_list.append(0)
         accuracy_list.append(0)
-
-    for x, lable in data_loder:
-
-        for idx_ in range(len(x)):
-
-            class_idx = lable[idx_]
-
-            if class_idx in reserved_classes and classes_counts[class_idx] < num_imgs:
-                test_images_data[class_idx].append(x[idx_])
-                test_images_lable[class_idx].append(lable[idx_])
-                classes_counts[class_idx] += 1
-
-    images_data = torch.empty([num_imgs * len(reserved_classes), 3, 32, 32])
-    images_lable = torch.empty([num_imgs * len(reserved_classes)], dtype=torch.long)
-
-    idx = 0
-    for class_x, class_y in zip(test_images_data, test_images_lable):
-        for x, y in zip(class_x, class_y):
-            images_data[idx] = x
-            images_lable[idx] = y
-            idx += 1
-
-    images_data, images_lable = images_data.cuda(), images_lable.cuda()
 
     out = model(images_data)
     out = torch.argmax(out, dim=1)
@@ -772,13 +805,17 @@ def test_reserved_classes(model, reserved_classes, data_path, num_imgs):
     for i in range(num_classes):
         accuracy_list[i] = correct_list[i] / num_imgs
 
-    print(correct_list)
-    print(accuracy_list)
+
     accuracy_all = 0
     for i in accuracy_list:
         accuracy_all += i
-    print(accuracy_all / len(reserved_classes))
+    all_acc = accuracy_all / len(reserved_classes)
+    if is_print:
+        print(correct_list)
+        print(accuracy_list)
+        print(all_acc)
 
+    return images_data, images_lable, all_acc
 
 if __name__ == '__main__':
 
@@ -831,7 +868,7 @@ if __name__ == '__main__':
     # model = torch.load('./original_models/VGG16_cifar10.pkl').cuda()
     # test(model, data_path, batchSize=1024, class_num=10)
 
-    image_num = 500  # 每个类保留图片数量
+    image_num = 500  # 每个类微调图片数量
     class_num = 2  # 随机保留类数量
     classes = []
 
@@ -844,6 +881,7 @@ if __name__ == '__main__':
         cc.sort()
         classes.append(cc)
 
+    classes = [[0, 1, 6, 7, 8]]
     for reserved_classes in classes:
         #
         #        res = './result9/VGG16_' + str(class_num) + 'C_AutoP.pdf'
@@ -858,30 +896,30 @@ if __name__ == '__main__':
         #        # test_latency('vgg19',model)
         #
 
-        # print(imgs.size())
         model.eval()
         class_num = len(reserved_classes)
-        # 读取剪枝用到的数据
         print(reserved_classes)
 
-        imgs_, imgs_lable = choose_best_data(model=model, dataSet_path="./data",
-                                             reserved_classes=reserved_classes, num_images=100,
-                                             correct_rate=0.8, is_train=True, use_KL=True, divide_radio=4)
+        # 读取剪枝用到的数据
+        # imgs_, imgs_lable = choose_best_data(model=model, dataSet_path="./data",
+        #                                      reserved_classes=reserved_classes, num_images=100,
+        #                                      correct_rate=0.8, is_train=True, use_KL=True, divide_radio=4)
         # 测试数据准确性
-        for ii in range(class_num):
-            out = model(imgs_[ii])
+        # for ii in range(class_num):
+        #     out = model(imgs_[ii])
+        #
+        #     y = torch.argmax(out, dim=1)
+        #
+        #     print(y.size(), imgs_lable[ii].size())
+        #     print(torch.eq(y, imgs_lable[ii]).sum().item() / imgs_lable[ii].size(0))
 
-            y = torch.argmax(out, dim=1)
+        # imgs = torch.cat(imgs_, dim=0)
 
-            print(y.size(), imgs_lable[ii].size())
-            print(torch.eq(y, imgs_lable[ii]).sum().item() / imgs_lable[ii].size(0))
-
-        imgs = torch.cat(imgs_, dim=0)
-
-        # imgs = read_Img2(data_path, batchSize=512, target_class=reserved_classes, pics_num=200)
+        imgs = read_Img2(data_path, batchSize=512, target_class=reserved_classes, pics_num=100)
         # 剪枝率
         img_score = 1.23 * float(get_img_socre(imgs, sampling=class_num * 10))
         pruned_percent = func(class_num / 10) + img_score
+        pruned_percent = 0.8
         print('pruning rate is', pruned_percent)
         #
         # imgs = read_Img('./mix/', transformer=transform)
@@ -963,7 +1001,7 @@ if __name__ == '__main__':
                 cfg.append('M')
 
         # ？？？？？？？？？
-        pruned_ratio = pruned / total
+        # pruned_ratio = pruned / total
 
         print()
         # test(model, data_path, batchSize=1024, class_num=10)
@@ -1052,19 +1090,18 @@ if __name__ == '__main__':
                                                                divide_radio=4)
 
         # 测试数据准确性
-        for ii in range(class_num):
-            out = model(fine_tuning_data[ii])
-
-            y = torch.argmax(out, dim=1)
-
-            print(y.size(), fine_tuning_lable[ii].size())
-            print(torch.eq(y, fine_tuning_lable[ii]).sum().item() / fine_tuning_lable[ii].size(0))
+        # for ii in range(class_num):
+        #     out = model(fine_tuning_data[ii])
+        #
+        #     y = torch.argmax(out, dim=1)
+        #
+        #     print(y.size(), fine_tuning_lable[ii].size())
+        #     print(torch.eq(y, fine_tuning_lable[ii]).sum().item() / fine_tuning_lable[ii].size(0))
 
 
         newmodel.train()
         fine_tuning(model=newmodel, data_list=fine_tuning_data,
-                    lable_list=fine_tuning_lable, EPOCH=50, model_save_path='', forzen=True)
-
+                    lable_list=fine_tuning_lable, EPOCH=100, model_save_path='', forzen=True)
         newmodel.eval()
         torch.save(newmodel, "models/VGG16_CIFAR10_NewModel.pkl")
 
@@ -1073,8 +1110,8 @@ if __name__ == '__main__':
 
         model.eval()
         newmodel.eval()
-        test_reserved_classes(model, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], "./data", 200)
-        test_reserved_classes(newmodel, reserved_classes, "./data", 200)
+        test_reserved_classes(model, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], "./data", 100)
+        test_reserved_classes(newmodel, reserved_classes, "./data", 100)
 
     # torch.cuda.empty_cache()
     #
