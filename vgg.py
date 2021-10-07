@@ -841,10 +841,11 @@ if __name__ == '__main__':
     if not os.path.exists(args.save):
         os.makedirs(args.save)
 
-    # model = vgg(dataset=args.dataset, depth=args.depth)
-    # train_model_all(model=model, epoches=50, batchSize=1024,
-    #                model_save_path='./models/VGG16_cifar10_Transfer_5.pkl',
-    #                trainSet_path=data_path)
+    model = vgg(dataset=args.dataset, depth=args.depth)
+    train_model_all(model=model, epoches=100, batchSize=1024,
+                   model_save_path='./models/VGG16_cifar10_Transfer_5.pkl',
+                   trainSet_path=data_path)
+    exit()
 
     model = torch.load('./models/VGG16_cifar10_Transfer_5.pkl').cuda()
     # print(model)
